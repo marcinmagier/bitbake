@@ -32,10 +32,22 @@ doctype = "html"
 class Clean(clean):
     def run(self):
         clean.run(self)
+        origpath = os.path.abspath(os.curdir)
+        os.chdir(os.path.join(origpath, 'doc'))
+        make = os.environ.get('MAKE') or 'make'
+        os.system('%s clean-%s DOC=bitbake-user-manual' % (make, doctype))
 
 class Build(build):
     def run(self):
         build.run(self)
+        origpath = os.path.abspath(os.curdir)
+        os.chdir(os.path.join(origpath, 'doc'))
+        make = os.environ.get('MAKE') or 'make'
+        ret = os.system('%s %s DOC=bitbake-user-manual' % (make, doctype))
+        if ret != 0:
+            print("ERROR: Unable to generate html documentation.")
+            sys.exit(ret)
+        os.chdir(origpath)
 
 setup(name='bitbake',
       version = __version__,

@@ -263,7 +263,7 @@ class VariableHistory(object):
                     flag = ''
                 o.write("#   %s %s:%s%s\n#     %s\"%s\"\n" % (event['op'], event['file'], event['line'], display_func, flag, re.sub('\n', '\n#     ', event['detail'])))
             if len(history) > 1:
-                o.write("# computed:\n")
+                o.write("# pre-expansion value:\n")
                 o.write('#   "%s"\n' % (commentVal))
         else:
             o.write("#\n# $%s\n#   [no history recorded]\n#\n" % var)
@@ -296,8 +296,13 @@ class VariableHistory(object):
                 self.variables[var] = []
 
 class DataSmart(MutableMapping):
-    def __init__(self, special = COWDictBase.copy(), seen = COWDictBase.copy() ):
+    def __init__(self, special = None, seen = None ):
         self.dict = {}
+
+        if special is None:
+            special = COWDictBase.copy()
+        if seen is None:
+            seen = COWDictBase.copy()
 
         self.inchistory = IncludeHistory()
         self.varhistory = VariableHistory(self)
@@ -589,7 +594,7 @@ class DataSmart(MutableMapping):
             self._makeShadowCopy(var)
         self.dict[var][flag] = value
 
-        if flag == "defaultval" and '_' in var:
+        if flag == "_defaultval" and '_' in var:
             self._setvar_update_overrides(var)
 
         if flag == "unexport" or flag == "export":
@@ -605,8 +610,8 @@ class DataSmart(MutableMapping):
         if local_var is not None:
             if flag in local_var:
                 value = copy.copy(local_var[flag])
-            elif flag == "_content" and "defaultval" in local_var and not noweakdefault:
-                value = copy.copy(local_var["defaultval"])
+            elif flag == "_content" and "_defaultval" in local_var and not noweakdefault:
+                value = copy.copy(local_var["_defaultval"])
         if expand and value:
             # Only getvar (flag == _content) hits the expand cache
             cachename = None
@@ -616,8 +621,10 @@ class DataSmart(MutableMapping):
                 cachename = var + "[" + flag + "]"
             value = self.expand(value, cachename)
         if value and flag == "_content" and local_var is not None and "_removeactive" in local_var:
-            filtered = filter(lambda v: v not in local_var["_removeactive"],
-                              value.split(" "))
+            removes = [self.expand(r).split()  for r in local_var["_removeactive"]]
+            removes = reduce(lambda a, b: a+b, removes, [])
+            filtered = filter(lambda v: v not in removes,
+                              value.split())
             value = " ".join(filtered)
             if expand:
                  # We need to ensure the expand cache has the correct value
@@ -739,12 +746,16 @@ class DataSmart(MutableMapping):
                 yield key
 
     def __iter__(self):
+        deleted = set()
         def keylist(d):        
             klist = set()
             for key in d:
                 if key == "_data":
                     continue
+                if key in deleted:
+                    continue
                 if not d[key]:
+                    deleted.add(key)
                     continue
                 klist.add(key)
 

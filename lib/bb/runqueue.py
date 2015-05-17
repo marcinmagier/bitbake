@@ -430,7 +430,7 @@ class RunQueueData:
             # Nothing to do
             return 0
 
-        logger.info("Preparing runqueue")
+        logger.info("Preparing RunQueue")
 
         # Step A - Work out a list of tasks to run
         #
@@ -879,9 +879,7 @@ class RunQueue:
             "fakerootenv" : self.rqdata.dataCache.fakerootenv,
             "fakerootdirs" : self.rqdata.dataCache.fakerootdirs,
             "fakerootnoenv" : self.rqdata.dataCache.fakerootnoenv,
-            "hashes" : bb.parse.siggen.taskhash,
-            "hash_deps" : bb.parse.siggen.runtaskdeps,
-            "sigchecksums" : bb.parse.siggen.file_checksum_values,
+            "sigdata" : bb.parse.siggen.get_taskdata(),
             "runq_hash" : self.rqdata.runq_hash,
             "logdefaultdebug" : bb.msg.loggerDefaultDebugLevel,
             "logdefaultverbose" : bb.msg.loggerDefaultVerbose,
@@ -1066,7 +1064,7 @@ class RunQueue:
             retval = self.rqexe.execute()
 
         if self.state is runQueueCleanUp:
-           self.rqexe.finish()
+            retval = self.rqexe.finish()
 
         if (self.state is runQueueComplete or self.state is runQueueFailed) and self.rqexe:
             self.teardown_workers()
@@ -1308,15 +1306,14 @@ class RunQueueExecute:
         if self.stats.active > 0:
             bb.event.fire(runQueueExitWait(self.stats.active), self.cfgData)
             self.rq.read_workers()
-
-            return
+            return self.rq.active_fds()
 
         if len(self.failed_fnids) != 0:
             self.rq.state = runQueueFailed
-            return
+            return True
 
         self.rq.state = runQueueComplete
-        return
+        return True
 
     def check_dependencies(self, task, taskdeps, setscene = False):
         if not self.rq.depvalidate:

@@ -123,11 +123,11 @@ class Command:
 
     def finishAsyncCommand(self, msg=None, code=None):
         if msg or msg == "":
-            bb.event.fire(CommandFailed(msg), self.cooker.event_data)
+            bb.event.fire(CommandFailed(msg), self.cooker.expanded_data)
         elif code:
-            bb.event.fire(CommandExit(code), self.cooker.event_data)
+            bb.event.fire(CommandExit(code), self.cooker.expanded_data)
         else:
-            bb.event.fire(CommandCompleted(), self.cooker.event_data)
+            bb.event.fire(CommandCompleted(), self.cooker.expanded_data)
         self.currentAsyncCommand = None
         self.cooker.finishcommand()
 
@@ -270,6 +270,11 @@ class CommandsSync:
     # although we change the internal state of the cooker, this is transparent since
     # we always take and leave the cooker in state.initial
     setFeatures.readonly = True
+
+    def updateConfig(self, command, params):
+        options = params[0]
+        environment = params[1]
+        command.cooker.updateConfigOpts(options, environment)
 
 class CommandsAsync:
     """
