@@ -109,6 +109,11 @@ class ConfigParameters(object):
                 action['action'] = ["generateDotGraph", self.options.pkgs_to_build, self.options.cmd]
             else:
                 action['msg'] = "Please specify a package name for dependency graph generation."
+        elif self.options.force_rebuild:
+            if len(self.options.pkgs_to_build) > 1:
+                action['action'] = ["invalidateDepTasks", self.options.pkgs_to_build, self.options.cmd]
+            else:
+                action['msg'] = "Please specify a task for invalidating and package name."
         else:
             if self.options.pkgs_to_build:
                 action['action'] = ["buildTargets", self.options.pkgs_to_build, self.options.cmd]

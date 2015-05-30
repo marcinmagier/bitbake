@@ -102,6 +102,9 @@ class BitBakeConfigParameters(cookerdata.ConfigParameters):
         parser.add_option("-f", "--force", help = "Force the specified targets/task to run (invalidating any existing stamp file).",
                    action = "store_true", dest = "force", default = False)
 
+        parser.add_option("-F", "--force-rebuild", help = "Invalidate the specified task and all subordinate tasks in specified target (invalidating any existing stamp files).",
+                   action = "store_true", dest = "force_rebuild", default = False)
+
         parser.add_option("-c", "--cmd", help = "Specify the task to execute. The exact options available depend on the metadata. Some examples might be 'compile' or 'populate_sysroot' or 'listtasks' may give a list of the tasks available.",
                    action = "store", dest = "cmd")
 

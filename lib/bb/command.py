@@ -303,6 +303,18 @@ class CommandsAsync:
         command.cooker.buildTargets(pkgs_to_build, task)
     buildTargets.needcache = True
 
+    def invalidateDepTasks(self, command, params):
+        """
+        Invalidate all dependent tasks
+        """
+        pkgs_to_build = params[0][1:]
+        task_to_invalidate = params[0][0]
+        task = params[1]
+
+        command.cooker.invalidateDepTasks(task_to_invalidate, pkgs_to_build, task)
+        command.finishAsyncCommand()
+    invalidateDepTasks.needcache = True
+
     def generateDepTreeEvent(self, command, params):
         """
         Generate an event containing the dependency information

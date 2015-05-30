@@ -649,6 +649,49 @@ class BBCooker:
         bb.event.fire(bb.event.TreeDataPreparationCompleted(len(fulltargetlist)), self.data)
         return taskdata, runlist, fulltargetlist
 
+
+    def findSubordinateTasks(self, taskdeps, task_name, subtasks=dict()):
+        """
+        Find dependent tasks
+        """
+        def getSubordinateTasks(task_name):
+            tasks = list()
+            for t,deps in taskdeps.items():
+                if task_name in deps:
+                    tasks.append(t)
+            return tasks
+
+        tasks = getSubordinateTasks(task_name)
+        subtasks[task_name] = tasks
+        if tasks:
+            [self.findSubordinateTasks(taskdeps, t, subtasks) for t in tasks]
+        return subtasks
+
+    def invalidateDepTasks(self, task_to_invalidate, pkgs_to_build, task):
+        """
+        Create a task dependency graph of pkgs_to_build.
+        Invalidate all dependent tasks.
+        """
+        def getModuleTask(module_task):
+            tmp = module_task.split(".")
+            return ".".join(tmp[:-1]), tmp[-1]
+
+        depgraph = self.generateTaskDepTreeData(pkgs_to_build, task)
+
+        module, task = getModuleTask(task_to_invalidate)
+        if not task.startswith("do_"):
+            task = "do_{0}".format(task)
+        deptasks = self.findSubordinateTasks(depgraph["tdepends"], "{0}.{1}".format(module, task))
+
+        # Remove stamps
+        for modtask in deptasks.keys():
+            mod, task = getModuleTask(modtask)
+            all_p = self.recipecache.providers[mod]
+            eligible, foundUnique = bb.providers.filterProviders(all_p, mod, self.data, self.recipecache)
+            bb.parse.siggen.invalidate_task(task, self.recipecache, eligible[0])
+            logger.debug(1, "Invalidate %s %s" % (mod, task) )
+        logger.info( "Invalidate all dependent tasks to %s" % (task_to_invalidate) )
+
     def prepareTreeData(self, pkgs_to_build, task):
         """
         Prepare a runqueue and taskdata object for iteration over pkgs_to_build
