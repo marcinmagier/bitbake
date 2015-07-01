@@ -654,7 +654,7 @@ except ImportError:
         outputdir = ''
     yacc.yacc(tabmodule = 'pyshtables', outputdir = outputdir, debug = 0)
 else:
-    yacc.yacc(tabmodule = 'pysh.pyshtables', write_tables = 0, debug = 0)
+    yacc.yacc(tabmodule = 'bb.pysh.pyshtables', write_tables = 0, debug = 0)
 
 
 def parse(input, eof=False, debug=False):
