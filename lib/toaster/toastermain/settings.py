@@ -23,6 +23,11 @@
 
 import os, re
 
+# Temporary toggle for Image customisation
+CUSTOM_IMAGE = False
+if os.environ.get("CUSTOM_IMAGE", None) is not None:
+    CUSTOM_IMAGE = True
+
 DEBUG = True
 TEMPLATE_DEBUG = DEBUG
 
@@ -48,6 +53,12 @@ DATABASES = {
         'PORT': '3306',                      # Set to empty string for default.
     }
 }
+
+# Needed when Using sqlite especially to add a longer timeout for waiting
+# for the database lock to be  released
+# https://docs.djangoproject.com/en/1.6/ref/databases/#database-is-locked-errors
+if 'sqlite' in DATABASES['default']['ENGINE']:
+    DATABASES['default']['OPTIONS'] = { 'timeout': 20 }
 
 # Reinterpret database settings if we have DATABASE_URL environment variable defined
 
@@ -81,11 +92,9 @@ if 'DATABASE_URL' in os.environ:
     else:
         raise Exception("FIXME: Please implement missing database url schema for url: %s" % dburl)
 
-
+BUILD_MODE = False
 if 'TOASTER_MANAGED' in os.environ and os.environ['TOASTER_MANAGED'] == "1":
-    MANAGED = True
-else:
-    MANAGED = False
+    BUILD_MODE = True
 
 # Allows current database settings to be exported as a DATABASE_URL environment variable value
 
@@ -223,7 +232,7 @@ CACHES = {
            'default': {
                'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
                'LOCATION': '/tmp/django-default-cache',
-               'TIMEOUT': 5,
+               'TIMEOUT': 1,
             }
           }
 
@@ -258,12 +267,17 @@ TEMPLATE_CONTEXT_PROCESSORS = ('django.contrib.auth.context_processors.auth',
  )
 
 INSTALLED_APPS = (
-    #'django.contrib.sites',
+    'django.contrib.auth',
+    'django.contrib.contenttypes',
+    'django.contrib.messages',
+    'django.contrib.sessions',
+    'django.contrib.admin',
     'django.contrib.staticfiles',
+
     # Uncomment the next line to enable admin documentation:
     # 'django.contrib.admindocs',
     'django.contrib.humanize',
-    'orm',
+    'bldcollector',
     'toastermain',
     'south',
 )
@@ -306,16 +320,6 @@ if os.environ.get('TOASTER_DEVEL', None) is not None:
 
 
 SOUTH_TESTS_MIGRATE = False
-
-# if we run in managed mode, we need user support
-if MANAGED:
-    INSTALLED_APPS = ('django.contrib.auth',
-    'django.contrib.contenttypes',
-    'django.contrib.messages',
-    'django.contrib.sessions',
-    # Uncomment the next line to enable the admin:
-    'django.contrib.admin',
-        ) + INSTALLED_APPS
 
 
 # We automatically detect and install applications here if
@@ -391,3 +395,19 @@ connection_created.connect(activate_synchronous_off)
 #
 
 
+class InvalidString(str):
+    def __mod__(self, other):
+        from django.template.base import TemplateSyntaxError
+        raise TemplateSyntaxError(
+            "Undefined variable or unknown value for: \"%s\"" % other)
+
+TEMPLATE_STRING_IF_INVALID = InvalidString("%s")
+
+import sys
+sys.path.append(
+    os.path.join(
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "contrib"),
+            "django-aggregate-if-master")
+    )

@@ -32,8 +32,6 @@ from django.contrib import admin
 admin.autodiscover()
 
 urlpatterns = patterns('',
-    # the api-s are not auto-discoverable
-    url(r'^api/1.0/', include('bldviewer.api')),
 
     # Examples:
     # url(r'^toaster/', include('toaster.foo.urls')),
@@ -41,6 +39,10 @@ urlpatterns = patterns('',
     # Uncomment the admin/doc line below to enable admin documentation:
     # url(r'^admin/doc/', include('django.contrib.admindocs.urls')),
 
+
+    # This is here to maintain backward compatibility and will be deprecated
+    # in the future.
+    url(r'^orm/eventfile$', 'bldcollector.views.eventfile'),
 
     # if no application is selected, we have the magic toastergui app here
     url(r'^$', never_cache(RedirectView.as_view(url='/toastergui/'))),
@@ -58,7 +60,7 @@ if toastermain.settings.DEBUG_PANEL_ENABLED:
     #logger.info("Enabled django_toolbar extension")
 
 
-if toastermain.settings.MANAGED:
+if toastermain.settings.BUILD_MODE:
     urlpatterns = [
         # Uncomment the next line to enable the admin:
         url(r'^admin/', include(admin.site.urls)),

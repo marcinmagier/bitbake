@@ -1,9 +1,9 @@
 import os,sys,logging
-import signal, time, atexit, threading
+import signal, time
 from SimpleXMLRPCServer import SimpleXMLRPCServer, SimpleXMLRPCRequestHandler
-import xmlrpclib
 import threading
 import Queue
+import socket
 
 try:
     import sqlite3
@@ -38,7 +38,6 @@ singleton = None
 class PRServer(SimpleXMLRPCServer):
     def __init__(self, dbfile, logfile, interface, daemon=True):
         ''' constructor '''
-        import socket
         try:
             SimpleXMLRPCServer.__init__(self, interface,
                                         logRequests=False, allow_none=True)
@@ -98,6 +97,13 @@ class PRServer(SimpleXMLRPCServer):
                 self.table.sync()
             self.table.sync_if_dirty()
 
+    def sigint_handler(self, signum, stack):
+        self.table.sync()
+
+    def sigterm_handler(self, signum, stack):
+        self.table.sync()
+        raise SystemExit
+
     def process_request(self, request, client_address):
         self.requestqueue.put((request, client_address))
 
@@ -142,13 +148,17 @@ class PRServer(SimpleXMLRPCServer):
         while not self.quit:
             self.handle_request()
         self.handlerthread.join()
-        self.table.sync()
+        self.db.disconnect()
         logger.info("PRServer: stopping...")
         self.server_close()
         return
 
     def start(self):
-        pid = self.daemonize()
+        if self.daemon:
+            pid = self.daemonize()
+        else:
+            pid = self.fork()
+
         # Ensure both the parent sees this and the child from the work_forever log entry above
         logger.info("Started PRServer with DBfile: %s, IP: %s, PORT: %s, PID: %s" %
                      (self.dbfile, self.host, self.port, str(pid)))
@@ -181,6 +191,24 @@ class PRServer(SimpleXMLRPCServer):
         except OSError as e:
             raise Exception("%s [%d]" % (e.strerror, e.errno))
 
+        self.cleanup_handles()
+        os._exit(0)
+
+    def fork(self):
+        try:
+            pid = os.fork()
+            if pid > 0:
+                return pid
+        except OSError as e:
+            raise Exception("%s [%d]" % (e.strerror, e.errno))
+
+        bb.utils.signal_on_parent_exit("SIGTERM")
+        self.cleanup_handles()
+        os._exit(0)
+
+    def cleanup_handles(self):
+        signal.signal(signal.SIGINT, self.sigint_handler)
+        signal.signal(signal.SIGTERM, self.sigterm_handler)
         os.umask(0)
         os.chdir("/")
 
@@ -213,7 +241,6 @@ class PRServer(SimpleXMLRPCServer):
 
         self.work_forever()
         self.delpid()
-        os._exit(0)
 
 class PRServSingleton(object):
     def __init__(self, dbfile, logfile, interface):
@@ -224,7 +251,7 @@ class PRServSingleton(object):
         self.port = None
 
     def start(self):
-        self.prserv = PRServer(self.dbfile, self.logfile, self.interface)
+        self.prserv = PRServer(self.dbfile, self.logfile, self.interface, daemon=False)
         self.prserv.start()
         self.host, self.port = self.prserv.getinfo()
 
@@ -262,7 +289,8 @@ class PRServerConnection(object):
         return self.host, self.port
 
 def start_daemon(dbfile, host, port, logfile):
-    pidfile = PIDPREFIX % (host, port)
+    ip = socket.gethostbyname(host)
+    pidfile = PIDPREFIX % (ip, port)
     try:
         pf = file(pidfile,'r')
         pid = int(pf.readline().strip())
@@ -275,12 +303,21 @@ def start_daemon(dbfile, host, port, logfile):
                             % pidfile)
         return 1
 
-    server = PRServer(os.path.abspath(dbfile), os.path.abspath(logfile), (host,port))
+    server = PRServer(os.path.abspath(dbfile), os.path.abspath(logfile), (ip,port))
     server.start()
+
+    # Sometimes, the port (i.e. localhost:0) indicated by the user does not match with
+    # the one the server actually is listening, so at least warn the user about it
+    _,rport = server.getinfo()
+    if port != rport:
+        sys.stdout.write("Server is listening at port %s instead of %s\n"
+                         % (rport,port))
     return 0
 
 def stop_daemon(host, port):
-    pidfile = PIDPREFIX % (host, port)
+    import glob
+    ip = socket.gethostbyname(host)
+    pidfile = PIDPREFIX % (ip, port)
     try:
         pf = file(pidfile,'r')
         pid = int(pf.readline().strip())
@@ -289,11 +326,23 @@ def stop_daemon(host, port):
         pid = None
 
     if not pid:
-        sys.stderr.write("pidfile %s does not exist. Daemon not running?\n"
-                        % pidfile)
+        # when server starts at port=0 (i.e. localhost:0), server actually takes another port,
+        # so at least advise the user which ports the corresponding server is listening
+        ports = []
+        portstr = ""
+        for pf in glob.glob(PIDPREFIX % (ip,'*')):
+            bn = os.path.basename(pf)
+            root, _ = os.path.splitext(bn)
+            ports.append(root.split('_')[-1])
+        if len(ports):
+            portstr = "Wrong port? Other ports listening at %s: %s" % (host, ' '.join(ports))
+
+        sys.stderr.write("pidfile %s does not exist. Daemon not running? %s\n"
+                         % (pidfile,portstr))
+        return 1
 
     try:
-        PRServerConnection(host, port).terminate()
+        PRServerConnection(ip, port).terminate()
     except:
         logger.critical("Stop PRService %s:%d failed" % (host,port))
 
