@@ -33,6 +33,7 @@ import fnmatch
 import traceback
 import errno
 import signal
+import ast
 from commands import getstatusoutput
 from contextlib import contextmanager
 from ctypes import cdll
@@ -291,19 +292,26 @@ def _print_trace(body, line):
             error.append('     %.4d:%s' % (i, body[i-1].rstrip()))
     return error
 
-def better_compile(text, file, realfile, mode = "exec"):
+def better_compile(text, file, realfile, mode = "exec", lineno = 0):
     """
     A better compile method. This method
     will print the offending lines.
     """
     try:
-        return compile(text, file, mode)
+        cache = bb.methodpool.compile_cache(text)
+        if cache:
+            return cache
+        # We can't add to the linenumbers for compile, we can pad to the correct number of blank lines though
+        text2 = "\n" * int(lineno) + text
+        code = compile(text2, realfile, mode)
+        bb.methodpool.compile_cache_add(text, code)
+        return code
     except Exception as e:
         error = []
         # split the text into lines again
         body = text.split('\n')
-        error.append("Error in compiling python function in %s:\n" % realfile)
-        if e.lineno:
+        error.append("Error in compiling python function in %s, line %s:\n" % (realfile, lineno))
+        if hasattr(e, "lineno"):
             error.append("The code lines resulting in this error were:")
             error.extend(_print_trace(body, e.lineno))
         else:
@@ -323,8 +331,10 @@ def _print_exception(t, value, tb, realfile, text, context):
         exception = traceback.format_exception_only(t, value)
         error.append('Error executing a python function in %s:\n' % realfile)
 
-        # Strip 'us' from the stack (better_exec call)
-        tb = tb.tb_next
+        # Strip 'us' from the stack (better_exec call) unless that was where the 
+        # error came from
+        if tb.tb_next is not None:
+            tb = tb.tb_next
 
         textarray = text.split('\n')
 
@@ -353,15 +363,6 @@ def _print_exception(t, value, tb, realfile, text, context):
                         error.extend(_print_trace(text, tbextract[level+1][1]))
                 except:
                     error.append(tbformat[level+1])
-            elif "d" in context and tbextract[level+1][2]:
-                # Try and find the code in the datastore based on the functionname
-                d = context["d"]
-                functionname = tbextract[level+1][2]
-                text = d.getVar(functionname, True)
-                if text:
-                    error.extend(_print_trace(text.split('\n'), tbextract[level+1][1]))
-                else:
-                    error.append(tbformat[level+1])
             else:
                 error.append(tbformat[level+1])
             nexttb = tb.tb_next
@@ -371,7 +372,7 @@ def _print_exception(t, value, tb, realfile, text, context):
     finally:
         logger.error("\n".join(error))
 
-def better_exec(code, context, text = None, realfile = "<code>"):
+def better_exec(code, context, text = None, realfile = "<code>", pythonexception=False):
     """
     Similiar to better_compile, better_exec will
     print the lines that are responsible for the
@@ -388,6 +389,8 @@ def better_exec(code, context, text = None, realfile = "<code>"):
         # Error already shown so passthrough, no need for traceback
         raise
     except Exception as e:
+        if pythonexception:
+            raise
         (t, value, tb) = sys.exc_info()
         try:
             _print_exception(t, value, tb, realfile, text, context)
@@ -533,6 +536,21 @@ def sha256_file(filename):
             s.update(line)
     return s.hexdigest()
 
+def sha1_file(filename):
+    """
+    Return the hex string representation of the SHA1 checksum of the filename
+    """
+    try:
+        import hashlib
+    except ImportError:
+        return None
+
+    s = hashlib.sha1()
+    with open(filename, "rb") as f:
+        for line in f:
+            s.update(line)
+    return s.hexdigest()
+
 def preserved_envvars_exported():
     """Variables which are taken from the environment and placed in and exported
     from the metadata"""
@@ -621,7 +639,7 @@ def build_environment(d):
     """
     import bb.data
     for var in bb.data.keys(d):
-        export = d.getVarFlag(var, "export")
+        export = d.getVarFlag(var, "export", False)
         if export:
             os.environ[var] = d.getVar(var, True) or ""
 
@@ -1177,7 +1195,7 @@ def edit_metadata(meta_lines, variables, varfunc, match_overrides=False):
             if not skip:
                 if checkspc:
                     checkspc = False
-                    if newlines[-1] == '\n' and line == '\n':
+                    if newlines and newlines[-1] == '\n' and line == '\n':
                         # Squash blank line if there are two consecutive blanks after a removal
                         continue
                 newlines.append(line)
@@ -1201,13 +1219,32 @@ def edit_metadata_file(meta_file, variables, varfunc):
 
 
 def edit_bblayers_conf(bblayers_conf, add, remove):
-    """Edit bblayers.conf, adding and/or removing layers"""
+    """Edit bblayers.conf, adding and/or removing layers
+    Parameters:
+        bblayers_conf: path to bblayers.conf file to edit
+        add: layer path (or list of layer paths) to add; None or empty
+            list to add nothing
+        remove: layer path (or list of layer paths) to remove; None or
+            empty list to remove nothing
+    Returns a tuple:
+        notadded: list of layers specified to be added but weren't
+            (because they were already in the list)
+        notremoved: list of layers that were specified to be removed
+            but weren't (because they weren't in the list)
+    """
 
     import fnmatch
 
     def remove_trailing_sep(pth):
         if pth and pth[-1] == os.sep:
             pth = pth[:-1]
+        return pth
+
+    approved = bb.utils.approved_variables()
+    def canonicalise_path(pth):
+        pth = remove_trailing_sep(pth)
+        if 'HOME' in approved and '~' in pth:
+            pth = os.path.expanduser(pth)
         return pth
 
     def layerlist_param(value):
@@ -1218,48 +1255,79 @@ def edit_bblayers_conf(bblayers_conf, add, remove):
         else:
             return [remove_trailing_sep(value)]
 
-    notadded = []
-    notremoved = []
-
     addlayers = layerlist_param(add)
     removelayers = layerlist_param(remove)
 
     # Need to use a list here because we can't set non-local variables from a callback in python 2.x
     bblayercalls = []
+    removed = []
+    plusequals = False
+    orig_bblayers = []
+
+    def handle_bblayers_firstpass(varname, origvalue, op, newlines):
+        bblayercalls.append(op)
+        if op == '=':
+            del orig_bblayers[:]
+        orig_bblayers.extend([canonicalise_path(x) for x in origvalue.split()])
+        return (origvalue, None, 2, False)
 
     def handle_bblayers(varname, origvalue, op, newlines):
-        bblayercalls.append(varname)
         updated = False
         bblayers = [remove_trailing_sep(x) for x in origvalue.split()]
         if removelayers:
             for removelayer in removelayers:
-                matched = False
                 for layer in bblayers:
-                    if fnmatch.fnmatch(layer, removelayer):
+                    if fnmatch.fnmatch(canonicalise_path(layer), canonicalise_path(removelayer)):
                         updated = True
-                        matched = True
                         bblayers.remove(layer)
+                        removed.append(removelayer)
                         break
-                if not matched:
-                    notremoved.append(removelayer)
-        if addlayers:
+        if addlayers and not plusequals:
             for addlayer in addlayers:
                 if addlayer not in bblayers:
                     updated = True
                     bblayers.append(addlayer)
-                else:
-                    notadded.append(addlayer)
             del addlayers[:]
 
         if updated:
+            if op == '+=' and not bblayers:
+                bblayers = None
             return (bblayers, None, 2, False)
         else:
             return (origvalue, None, 2, False)
 
-    edit_metadata_file(bblayers_conf, ['BBLAYERS'], handle_bblayers)
+    with open(bblayers_conf, 'r') as f:
+        (_, newlines) = edit_metadata(f, ['BBLAYERS'], handle_bblayers_firstpass)
 
     if not bblayercalls:
         raise Exception('Unable to find BBLAYERS in %s' % bblayers_conf)
+
+    # Try to do the "smart" thing depending on how the user has laid out
+    # their bblayers.conf file
+    if bblayercalls.count('+=') > 1:
+        plusequals = True
+
+    removelayers_canon = [canonicalise_path(layer) for layer in removelayers]
+    notadded = []
+    for layer in addlayers:
+        layer_canon = canonicalise_path(layer)
+        if layer_canon in orig_bblayers and not layer_canon in removelayers_canon:
+            notadded.append(layer)
+    notadded_canon = [canonicalise_path(layer) for layer in notadded]
+    addlayers[:] = [layer for layer in addlayers if canonicalise_path(layer) not in notadded_canon]
+
+    (updated, newlines) = edit_metadata(newlines, ['BBLAYERS'], handle_bblayers)
+    if addlayers:
+        # Still need to add these
+        for addlayer in addlayers:
+            newlines.append('BBLAYERS += "%s"\n' % addlayer)
+        updated = True
+
+    if updated:
+        with open(bblayers_conf, 'w') as f:
+            f.writelines(newlines)
+
+    notremoved = list(set(removelayers) - set(removed))
 
     return (notadded, notremoved)
 
@@ -1335,3 +1403,33 @@ def ioprio_set(who, cls, value):
             raise ValueError("Unable to set ioprio, syscall returned %s" % rc)
     else:
         bb.warn("Unable to set IO Prio for arch %s" % _unamearch)
+
+def set_process_name(name):
+    from ctypes import cdll, byref, create_string_buffer
+    # This is nice to have for debugging, not essential
+    try:
+        libc = cdll.LoadLibrary('libc.so.6')
+        buff = create_string_buffer(len(name)+1)
+        buff.value = name
+        libc.prctl(15, byref(buff), 0, 0, 0)
+    except:
+        pass
+
+# export common proxies variables from datastore to environment
+def export_proxies(d):
+    import os
+
+    variables = ['http_proxy', 'HTTP_PROXY', 'https_proxy', 'HTTPS_PROXY',
+                    'ftp_proxy', 'FTP_PROXY', 'no_proxy', 'NO_PROXY']
+    exported = False
+
+    for v in variables:
+        if v in os.environ.keys():
+            exported = True
+        else:
+            v_proxy = d.getVar(v, True)
+            if v_proxy is not None:
+                os.environ[v] = v_proxy
+                exported = True
+
+    return exported

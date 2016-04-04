@@ -121,11 +121,14 @@ def findPreferredProvider(pn, cfgData, dataCache, pkg_pn = None, item = None):
     preferred_file = None
     preferred_ver = None
 
-    localdata = data.createCopy(cfgData)
-    localdata.setVar('OVERRIDES', "%s:pn-%s:%s" % (data.getVar('OVERRIDES', localdata), pn, pn))
-    bb.data.update_data(localdata)
+    # pn can contain '_', e.g. gcc-cross-x86_64 and an override cannot
+    # hence we do this manually rather than use OVERRIDES
+    preferred_v = cfgData.getVar("PREFERRED_VERSION_pn-%s" % pn, True)
+    if not preferred_v:
+        preferred_v = cfgData.getVar("PREFERRED_VERSION_%s" % pn, True)
+    if not preferred_v:
+        preferred_v = cfgData.getVar("PREFERRED_VERSION", True)
 
-    preferred_v = localdata.getVar('PREFERRED_VERSION', True)
     if preferred_v:
         m = re.match('(\d+:)*(.*)(_.*)*', preferred_v)
         if m:
@@ -379,3 +382,29 @@ def getRuntimeProviders(dataCache, rdepend):
             logger.debug(1, "Assuming %s is a dynamic package, but it may not exist" % rdepend)
 
     return rproviders
+
+
+def buildWorldTargetList(dataCache):
+    """
+    Build package list for "bitbake world"
+    """
+    if dataCache.world_target:
+        return
+
+    logger.debug(1, "collating packages for \"world\"")
+    for f in dataCache.possible_world:
+        terminal = True
+        pn = dataCache.pkg_fn[f]
+
+        for p in dataCache.pn_provides[pn]:
+            if p.startswith('virtual/'):
+                logger.debug(2, "World build skipping %s due to %s provider starting with virtual/", f, p)
+                terminal = False
+                break
+            for pf in dataCache.providers[p]:
+                if dataCache.pkg_fn[pf] != pn:
+                    logger.debug(2, "World build skipping %s due to both us and %s providing %s", f, pf, p)
+                    terminal = False
+                    break
+        if terminal:
+            dataCache.world_target.add(pn)
