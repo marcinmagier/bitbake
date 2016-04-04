@@ -7,13 +7,13 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('orm', '0004_merge'),
+        ('bldcontrol', '0001_initial'),
     ]
 
     operations = [
         migrations.AlterField(
-            model_name='customimagerecipe',
-            name='recipe_ptr',
-            field=models.OneToOneField(parent_link=True, auto_created=True, primary_key=True, serialize=False, to='orm.Recipe'),
+            model_name='buildenvironment',
+            name='betype',
+            field=models.IntegerField(choices=[(0, b'local')]),
         ),
     ]
