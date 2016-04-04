@@ -30,21 +30,23 @@ from orm.models import Project, Release, BitbakeVersion, Package, LogMessage
 from orm.models import ReleaseLayerSourcePriority, LayerSource, Layer, Build
 from orm.models import Layer_Version, Recipe, Machine, ProjectLayer, Target
 from orm.models import CustomImageRecipe, ProjectVariable
-from orm.models import Branch
+from orm.models import Branch, CustomImagePackage
 
 import toastermain
+import inspect
+import toastergui
 
 from toastergui.tables import SoftwareRecipesTable
 import json
+from datetime import timedelta
 from bs4 import BeautifulSoup
 import re
+import string
+import json
 
 PROJECT_NAME = "test project"
+PROJECT_NAME2 = "test project 2"
 CLI_BUILDS_PROJECT_NAME = 'Command line builds'
-
-# by default, tests are run in build mode; to run in analysis mode,
-# set this to False in individual test cases
-toastermain.settings.BUILD_MODE = True
 
 class ViewTests(TestCase):
     """Tests to verify view APIs."""
@@ -55,13 +57,46 @@ class ViewTests(TestCase):
         release = Release.objects.create(name="test release",
                                          branch_name="master",
                                          bitbake_version=bbv)
+        release2 = Release.objects.create(name="test release 2",
+                                          branch_name="master",
+                                          bitbake_version=bbv)
+
         self.project = Project.objects.create_project(name=PROJECT_NAME,
                                                       release=release)
+
+        self.project2 = Project.objects.create_project(name=PROJECT_NAME2,
+                                                       release=release2)
+
         now = timezone.now()
+        later = now + timedelta(days=1)
 
         build = Build.objects.create(project=self.project,
                                      started_on=now,
-                                     completed_on=now)
+                                     completed_on=now,
+                                     outcome=Build.SUCCEEDED)
+
+        # for testing BuildsTable
+        build1 = Build.objects.create(project=self.project,
+                                      started_on=now,
+                                      completed_on=now,
+                                      outcome=Build.SUCCEEDED,
+                                      machine="raspberrypi2")
+
+        Build.objects.create(project=self.project,
+                             started_on=later,
+                             completed_on=later,
+                             outcome=Build.FAILED,
+                             machine="qemux86")
+
+        Build.objects.create(project=self.project2,
+                             started_on=later,
+                             completed_on=later,
+                             outcome=Build.SUCCEEDED,
+                             machine="qemux86")
+
+        # to test sorting by errors and warnings in BuildsTable
+        LogMessage.objects.create(build=build1, level=LogMessage.WARNING)
+        LogMessage.objects.create(build=build1, level=LogMessage.ERROR)
 
         layersrc = LayerSource.objects.create(sourcetype=LayerSource.TYPE_IMPORTED)
         self.priority = ReleaseLayerSourcePriority.objects.create(release=release,
@@ -69,32 +104,93 @@ class ViewTests(TestCase):
         layer = Layer.objects.create(name="base-layer", layer_source=layersrc,
                                      vcs_url="/tmp/")
 
+        layer_two = Layer.objects.create(name="z-layer",
+                                         layer_source=layersrc,
+                                         vcs_url="git://two/")
+
+
         branch = Branch.objects.create(name="master", layer_source=layersrc)
 
-        lver = Layer_Version.objects.create(layer=layer, project=self.project,
-                                            layer_source=layersrc, commit="master",
-                                            up_branch=branch)
+        self.lver = Layer_Version.objects.create(layer=layer,
+                                                 project=self.project,
+                                                 layer_source=layersrc,
+                                                 commit="master",
+                                                 dirpath="/tmp/",
+                                                 up_branch=branch)
 
+        lver_two = Layer_Version.objects.create(layer=layer_two,
+                                                layer_source=layersrc,
+                                                commit="master",
+                                                up_branch=branch)
+
+        Recipe.objects.create(layer_source=layersrc,
+                              name="z recipe",
+                              version="5.2",
+                              summary="z recipe",
+                              description="G recipe",
+                              license="Z GPL",
+                              section="h section",
+                              layer_version=lver_two)
+
+        # Create a dummy recipe file for the custom image generation to read
+        open("/tmp/my_recipe.bb", 'wa').close()
         self.recipe1 = Recipe.objects.create(layer_source=layersrc,
                                              name="base-recipe",
                                              version="1.2",
                                              summary="one recipe",
                                              description="recipe",
-                                             layer_version=lver)
+                                             section="A section",
+                                             license="Apache",
+                                             layer_version=self.lver,
+                                             file_path="my_recipe.bb")
 
-        Machine.objects.create(layer_version=lver, name="wisk",
+        Machine.objects.create(layer_version=self.lver, name="wisk",
                                description="wisking machine")
+        Machine.objects.create(layer_version=self.lver, name="zap",
+                               description="zap machine")
+        Machine.objects.create(layer_version=lver_two, name="xray",
+                               description="xray machine")
 
-        ProjectLayer.objects.create(project=self.project, layercommit=lver)
 
+
+        ProjectLayer.objects.create(project=self.project, layercommit=self.lver)
+
+        lver_custom = Layer_Version.objects.create(layer=layer,
+                                                   project=self.project,
+                                                   layer_source=layersrc,
+                                                   commit="mymaster",
+                                                   up_branch=branch)
 
         self.customr = CustomImageRecipe.objects.create(\
                            name="custom recipe", project=self.project,
-                           base_recipe=self.recipe1)
+                           base_recipe=self.recipe1,
+                           file_path="custr",
+                           layer_version=lver_custom)
 
-        self.package = Package.objects.create(name='pkg1', recipe=self.recipe1,
+        self.package = Package.objects.create(name='pkg1',
+                                              size=999,
+                                              recipe=self.recipe1,
+                                              license="HHH",
                                               build=build)
 
+        Package.objects.create(name='A pkg1',
+                               size=777,
+                               recipe=self.recipe1,
+                               build=build)
+
+        Package.objects.create(name='zpkg1',
+                               recipe=self.recipe1,
+                               build=build,
+                               size=4,
+                               license="ZZ")
+
+        self.cust_package = CustomImagePackage.objects.create(
+            name="A pkg",
+            recipe=self.recipe1,
+            size=10,
+            license="AAA")
+
+        self.customr.appends_set.add(self.cust_package)
 
         # recipe with project for testing AvailableRecipe table
         self.recipe2 = Recipe.objects.create(layer_source=layersrc,
@@ -102,18 +198,65 @@ class ViewTests(TestCase):
                                              version="1.4",
                                              summary="a fancy recipe",
                                              description="fancy recipe",
-                                             layer_version=lver,
+                                             license="MIT",
+                                             layer_version=self.lver,
+                                             section="Z section",
                                              file_path='/home/foo')
 
-        self.assertTrue(lver in self.project.compatible_layerversions())
+        # additional package for the sorting for the SelectPackagesTable
+        cust_package_two = CustomImagePackage.objects.create(name="ZZ pkg",
+                                                        size=5,
+                                                        recipe=self.recipe2)
+
+        self.customr.appends_set.add(cust_package_two)
+
+        Package.objects.create(name='one1',
+                               recipe=self.recipe2,
+                               build=build,
+                               size=2,
+                               license="L")
+
+        Recipe.objects.create(layer_source=layersrc,
+                              is_image=True,
+                              name="Test image one",
+                              version="1.2",
+                              summary="one recipe",
+                              description="recipe",
+                              section="A",
+                              license="A",
+                              file_path="/one/",
+                              layer_version=self.lver)
+
+        zrecipe = Recipe.objects.create(layer_source=layersrc,
+                                        is_image=True,
+                                        name="Z Test image two",
+                                        version="1.3",
+                                        summary="two image recipe",
+                                        description="recipe two",
+                                        section="B",
+                                        license="Z",
+                                        file_path="/two/",
+                                        layer_version=lver_two)
+
+        CustomImageRecipe.objects.create(name="z custom recipe",
+                                         project=self.project,
+                                         base_recipe=zrecipe,
+                                         file_path="zzzz",
+                                         layer_version=lver_custom)
+
+        # Packages in PackagesTable requre that the recipe has been built so
+        # we need to create a target and build pair
+        target = Target.objects.create(target=self.recipe1.name,
+                                       build=build)
+
+
 
     def test_get_base_call_returns_html(self):
         """Basic test for all-projects view"""
         response = self.client.get(reverse('all-projects'), follow=True)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response['Content-Type'].startswith('text/html'))
-        self.assertTemplateUsed(response, "projects.html")
-        self.assertTrue(PROJECT_NAME in response.content)
+        self.assertTemplateUsed(response, "projects-toastertable.html")
 
     def test_get_json_call_returns_json(self):
         """Test for all projects output in json format"""
@@ -130,13 +273,6 @@ class ViewTests(TestCase):
 
         self.assertTrue(PROJECT_NAME in [x["name"] for x in data["rows"]])
         self.assertTrue("id" in data["rows"][0])
-
-        self.assertEqual(sorted(data["rows"][0]),
-                         ['bitbake_version_id', 'created', 'id',
-                          'is_default', 'layersTypeAheadUrl', 'name',
-                          'num_builds', 'projectBuildsUrl', 'projectPageUrl',
-                          'recipesTypeAheadUrl', 'release_id',
-                          'short_description', 'updated', 'user_id'])
 
     def test_typeaheads(self):
         """Test typeahead ReST API"""
@@ -181,7 +317,6 @@ class ViewTests(TestCase):
 
             return False
 
-        import string
 
         for url in urls:
             results = False
@@ -290,7 +425,9 @@ class ViewTests(TestCase):
         name = "to be deleted"
         recipe = CustomImageRecipe.objects.create(\
                      name=name, project=self.project,
-                     base_recipe=self.recipe1)
+                     base_recipe=self.recipe1,
+                     file_path="/tmp/testing",
+                     layer_version=self.customr.layer_version)
         url = reverse('xhr_customrecipe_id', args=(recipe.id,))
         response = self.client.delete(url)
         self.assertEqual(response.status_code, 200)
@@ -303,20 +440,34 @@ class ViewTests(TestCase):
 
     def test_xhr_custom_packages(self):
         """Test adding and deleting package to a custom recipe"""
-        url = reverse('xhr_customrecipe_packages',
-                      args=(self.customr.id, self.package.id))
-        # add self.package1 to recipe
-        response = self.client.put(url)
+        # add self.package to recipe
+        response = self.client.put(reverse('xhr_customrecipe_packages',
+                                           args=(self.customr.id,
+                                                 self.cust_package.id)))
+
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(json.loads(response.content), {"error": "ok"})
-        self.assertEqual(self.customr.packages.all()[0].id, self.package.id)
+        self.assertEqual(json.loads(response.content),
+                         {"error": "ok"})
+        self.assertEqual(self.customr.appends_set.first().name,
+                         self.cust_package.name)
         # delete it
-        response = self.client.delete(url)
+        to_delete = self.customr.appends_set.first().pk
+        del_url = reverse('xhr_customrecipe_packages',
+                          args=(self.customr.id, to_delete))
+
+        response = self.client.delete(del_url)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(json.loads(response.content), {"error": "ok"})
-        self.assertFalse(self.customr.packages.all())
-        # delete it again to test error condition
-        response = self.client.delete(url)
+        all_packages = self.customr.get_all_packages().values_list('pk',
+                                                                   flat=True)
+
+        self.assertFalse(to_delete in all_packages)
+        # delete invalid package to test error condition
+        del_url = reverse('xhr_customrecipe_packages',
+                          args=(self.customr.id,
+                                99999))
+
+        response = self.client.delete(del_url)
         self.assertEqual(response.status_code, 200)
         self.assertNotEqual(json.loads(response.content)["error"], "ok")
 
@@ -332,6 +483,14 @@ class ViewTests(TestCase):
                 self.assertNotEqual(json.loads(response.content),
                                     {"error": "ok"})
 
+    def test_download_custom_recipe(self):
+        response = self.client.get(reverse('customrecipedownload',
+                                           args=(self.project.id,
+                                                 self.customr.id)))
+
+        self.assertEqual(response.status_code, 200)
+
+
     def test_software_recipes_table(self):
         """Test structure returned for Software RecipesTable"""
         table = SoftwareRecipesTable()
@@ -344,7 +503,8 @@ class ViewTests(TestCase):
         row2 = next(x for x in rows if x['name'] == self.recipe2.name)
 
         self.assertEqual(response.status_code, 200, 'should be 200 OK status')
-        self.assertEqual(len(rows), 2, 'should be 2 recipes')
+        # All recipes in the setUp
+        self.assertEqual(len(rows), 5, 'should be 5 recipes')
 
         # check other columns have been populated correctly
         self.assertEqual(row1['name'], self.recipe1.name)
@@ -359,6 +519,151 @@ class ViewTests(TestCase):
                          self.recipe2.description)
         self.assertEqual(row2['layer_version__layer__name'],
                          self.recipe2.layer_version.layer.name)
+
+    def test_toaster_tables(self):
+        """Test all ToasterTables instances"""
+        current_recipes = self.project.get_available_recipes()
+
+        def get_data(table, options={}):
+            """Send a request and parse the json response"""
+            options['format'] = "json"
+            options['nocache'] = "true"
+            request = RequestFactory().get('/', options)
+            # Add any kwargs that are needed by any of the possible tables
+            response = table.get(request,
+                                 pid=self.project.id,
+                                 layerid=self.lver.pk,
+                                 recipeid=self.recipe1.pk,
+                                 recipe_id=self.recipe1.pk,
+                                 custrecipeid=self.customr.pk)
+            return json.loads(response.content)
+
+        # Get a list of classes in tables module
+        tables = inspect.getmembers(toastergui.tables, inspect.isclass)
+
+        for name, table_cls in tables:
+            # Filter out the non ToasterTables from the tables module
+            if not issubclass(table_cls, toastergui.widgets.ToasterTable) or \
+                table_cls == toastergui.widgets.ToasterTable:
+                continue
+
+            # Get the table data without any options, this also does the
+            # initialisation of the table i.e. setup_columns,
+            # setup_filters and setup_queryset that we can use later
+            table = table_cls()
+            all_data = get_data(table)
+
+            self.assertTrue(len(all_data['rows']) > 1,
+                            "Cannot test on a %s table with < 1 row" % name)
+
+            if table.default_orderby:
+                row_one = all_data['rows'][0][table.default_orderby.strip("-")]
+                row_two = all_data['rows'][1][table.default_orderby.strip("-")]
+
+                if '-' in table.default_orderby:
+                    self.assertTrue(row_one >= row_two,
+                                    "Default ordering not working on %s" % name)
+                else:
+                    self.assertTrue(row_one <= row_two,
+                                    "Default ordering not working on %s" % name)
+
+            # Test the column ordering and filtering functionality
+            for column in table.columns:
+                if column['orderable']:
+                    # If a column is orderable test it in both order
+                    # directions ordering on the columns field_name
+                    ascending = get_data(table_cls(),
+                                         {"orderby" : column['field_name']})
+
+                    row_one = ascending['rows'][0][column['field_name']]
+                    row_two = ascending['rows'][1][column['field_name']]
+
+                    self.assertTrue(row_one <= row_two,
+                                    "Ascending sort applied but row 0 is less "
+                                    "than row 1")
+
+                    descending = get_data(table_cls(),
+                                          {"orderby" :
+                                           '-'+column['field_name']})
+
+                    row_one = descending['rows'][0][column['field_name']]
+                    row_two = descending['rows'][1][column['field_name']]
+
+                    self.assertTrue(row_one >= row_two,
+                                    "Descending sort applied but row 0 is "
+                                    "greater than row 1")
+
+                    # If the two start rows are the same we haven't actually
+                    # changed the order
+                    self.assertNotEqual(ascending['rows'][0],
+                                        descending['rows'][0],
+                                        "An orderby %s has not changed the "
+                                        "order of the data in table %s" %
+                                        (column['field_name'], name))
+
+                if column['filter_name']:
+                    # If a filter is available for the column get the filter
+                    # info. This contains what filter actions are defined.
+                    filter_info = get_data(table_cls(),
+                                           {"cmd": "filterinfo",
+                                            "name": column['filter_name']})
+                    self.assertTrue(len(filter_info['filter_actions']) > 0,
+                                    "Filter %s was defined but no actions "
+                                    "added to it" % column['filter_name'])
+
+                    for filter_action in filter_info['filter_actions']:
+                        # filter string to pass as the option
+                        # This is the name of the filter:action
+                        # e.g. project_filter:not_in_project
+                        filter_string = "%s:%s" % (column['filter_name'],
+                                                   filter_action['action_name'])
+                        # Now get the data with the filter applied
+                        filtered_data = get_data(table_cls(),
+                                                 {"filter" : filter_string})
+
+                        # date range filter actions can't specify the
+                        # number of results they return, so their count is 0
+                        if filter_action['count'] != None:
+                            self.assertEqual(len(filtered_data['rows']),
+                                             int(filter_action['count']),
+                                             "We added a table filter for %s but "
+                                             "the number of rows returned was not "
+                                             "what the filter info said there "
+                                             "would be" % name)
+
+
+            # Test search functionality on the table
+            something_found = False
+            for search in list(string.ascii_letters):
+                search_data = get_data(table_cls(), {'search' : search})
+
+                if len(search_data['rows']) > 0:
+                    something_found = True
+                    break
+
+            self.assertTrue(something_found,
+                            "We went through the whole alphabet and nothing"
+                            " was found for the search of table %s" % name)
+
+            # Test the limit functionality on the table
+            limited_data = get_data(table_cls(), {'limit' : "1"})
+            self.assertEqual(len(limited_data['rows']),
+                             1,
+                             "Limit 1 set on table %s but not 1 row returned"
+                             % name)
+
+            # Test the pagination functionality on the table
+            page_one_data = get_data(table_cls(), {'limit' : "1",
+                                                   "page": "1"})['rows'][0]
+
+            page_two_data = get_data(table_cls(), {'limit' : "1",
+                                                   "page": "2"})['rows'][0]
+
+            self.assertNotEqual(page_one_data,
+                                page_two_data,
+                                "Changed page on table %s but first row is the "
+                                "same as the previous page" % name)
+
 
 class LandingPageTests(TestCase):
     """ Tests for redirects on the landing page """
@@ -476,6 +781,10 @@ class AllProjectsPageTests(TestCase):
                                                      value=self.MACHINE_NAME)
         project_var.save()
 
+    def _get_row_for_project(self, data, project_id):
+        """ Get the object representing the table data for a project """
+        return [row for row in data['rows'] if row['id'] == project_id][0]
+
     def test_default_project_hidden(self):
         """ The default project should be hidden if it has no builds """
         params = {"count": 10, "orderby": "updated:-", "page": 1}
@@ -491,11 +800,20 @@ class AllProjectsPageTests(TestCase):
         self._add_build_to_default_project()
 
         params = {"count": 10, "orderby": "updated:-", "page": 1}
-        response = self.client.get(reverse('all-projects'), params)
 
-        self.assertTrue('tr class="data"' in response.content,
-                        'should be a project row in the page')
-        self.assertTrue(CLI_BUILDS_PROJECT_NAME in response.content,
+        response = self.client.get(
+            reverse('all-projects'),
+            {'format': 'json'},
+            params
+        )
+
+        data = json.loads(response.content)
+
+        # find the row for the default project
+        default_project_row = self._get_row_for_project(data, self.default_project.id)
+
+        # check its name template has the correct text
+        self.assertEqual(default_project_row['name'], CLI_BUILDS_PROJECT_NAME,
                         'default project "cli builds" should be in page')
 
     def test_default_project_release(self):
@@ -509,24 +827,32 @@ class AllProjectsPageTests(TestCase):
         # another project to test, which should show release
         self._add_non_default_project()
 
-        response = self.client.get(reverse('all-projects'), follow=True)
-        soup = BeautifulSoup(response.content)
+        response = self.client.get(
+            reverse('all-projects'),
+            {'format': 'json'},
+            follow=True
+        )
 
-        # check the release cell for the default project
-        attrs = {'data-project': str(self.default_project.id)}
-        rows = soup.find_all('tr', attrs=attrs)
-        self.assertEqual(len(rows), 1, 'should be one row for default project')
-        cells = rows[0].find_all('td', attrs={'data-project-field': 'release'})
-        self.assertEqual(len(cells), 1, 'should be one release cell')
-        text = cells[0].select('span.muted')[0].text
+        data = json.loads(response.content)
+
+        # used to find the correct span in the template output
+        attrs = {'data-project-field': 'release'}
+
+        # find the row for the default project
+        default_project_row = self._get_row_for_project(data, self.default_project.id)
+
+        # check the release text for the default project
+        soup = BeautifulSoup(default_project_row['static:release'])
+        text = soup.find('span', attrs=attrs).select('span.muted')[0].text
         self.assertEqual(text, 'Not applicable',
                          'release should be not applicable for default project')
 
+        # find the row for the default project
+        other_project_row = self._get_row_for_project(data, self.project.id)
+
         # check the link in the release cell for the other project
-        attrs = {'data-project': str(self.project.id)}
-        rows = soup.find_all('tr', attrs=attrs)
-        cells = rows[0].find_all('td', attrs={'data-project-field': 'release'})
-        text = cells[0].select('a')[0].text
+        soup = BeautifulSoup(other_project_row['static:release'])
+        text = soup.find('span', attrs=attrs).select('a')[0].text.strip()
         self.assertEqual(text, self.release.name,
                          'release name should be shown for non-default project')
 
@@ -541,24 +867,32 @@ class AllProjectsPageTests(TestCase):
         # another project to test, which should show machine
         self._add_non_default_project()
 
-        response = self.client.get(reverse('all-projects'), follow=True)
-        soup = BeautifulSoup(response.content)
+        response = self.client.get(
+            reverse('all-projects'),
+            {'format': 'json'},
+            follow=True
+        )
+
+        data = json.loads(response.content)
+
+        # used to find the correct span in the template output
+        attrs = {'data-project-field': 'machine'}
+
+        # find the row for the default project
+        default_project_row = self._get_row_for_project(data, self.default_project.id)
 
         # check the machine cell for the default project
-        attrs = {'data-project': str(self.default_project.id)}
-        rows = soup.find_all('tr', attrs=attrs)
-        self.assertEqual(len(rows), 1, 'should be one row for default project')
-        cells = rows[0].find_all('td', attrs={'data-project-field': 'machine'})
-        self.assertEqual(len(cells), 1, 'should be one machine cell')
-        text = cells[0].select('span.muted')[0].text
+        soup = BeautifulSoup(default_project_row['static:machine'])
+        text = soup.find('span', attrs=attrs).select('span.muted')[0].text.strip()
         self.assertEqual(text, 'Not applicable',
-                         'machine should be not applicable for default project')
+            'machine should be not applicable for default project')
+
+        # find the row for the default project
+        other_project_row = self._get_row_for_project(data, self.project.id)
 
         # check the link in the machine cell for the other project
-        attrs = {'data-project': str(self.project.id)}
-        rows = soup.find_all('tr', attrs=attrs)
-        cells = rows[0].find_all('td', attrs={'data-project-field': 'machine'})
-        text = cells[0].select('a')[0].text
+        soup = BeautifulSoup(other_project_row['static:machine'])
+        text = soup.find('span', attrs=attrs).find('a').text.strip()
         self.assertEqual(text, self.MACHINE_NAME,
                          'machine name should be shown for non-default project')
 
@@ -572,24 +906,33 @@ class AllProjectsPageTests(TestCase):
         # need a build, otherwise project doesn't display at all
         self._add_build_to_default_project()
 
-        # another project to test, which should show machine
+        # another project to test
         self._add_non_default_project()
 
-        response = self.client.get(reverse('all-projects'), follow=True)
-        soup = BeautifulSoup(response.content)
+        response = self.client.get(
+            reverse('all-projects'),
+            {'format': 'json'},
+            follow=True
+        )
 
-        # link for default project
-        row = soup.find('tr', attrs={'data-project': self.default_project.id})
-        cell = row.find('td', attrs={'data-project-field': 'name'})
+        data = json.loads(response.content)
+
+        # find the row for the default project
+        default_project_row = self._get_row_for_project(data, self.default_project.id)
+
+        # check the link on the name field
+        soup = BeautifulSoup(default_project_row['static:name'])
         expected_url = reverse('projectbuilds', args=(self.default_project.id,))
-        self.assertEqual(cell.find('a')['href'], expected_url,
+        self.assertEqual(soup.find('a')['href'], expected_url,
                          'link on default project name should point to builds')
 
-        # link for other project
-        row = soup.find('tr', attrs={'data-project': self.project.id})
-        cell = row.find('td', attrs={'data-project-field': 'name'})
+        # find the row for the other project
+        other_project_row = self._get_row_for_project(data, self.project.id)
+
+        # check the link for the other project
+        soup = BeautifulSoup(other_project_row['static:name'])
         expected_url = reverse('project', args=(self.project.id,))
-        self.assertEqual(cell.find('a')['href'], expected_url,
+        self.assertEqual(soup.find('a')['href'], expected_url,
                          'link on project name should point to configuration')
 
 class ProjectBuildsPageTests(TestCase):
@@ -649,9 +992,9 @@ class ProjectBuildsPageTests(TestCase):
     def _get_rows_for_project(self, project_id):
         """ Helper to retrieve HTML rows for a project """
         url = reverse("projectbuilds", args=(project_id,))
-        response = self.client.get(url, follow=True)
-        soup = BeautifulSoup(response.content)
-        return soup.select('tr[class="data"]')
+        response = self.client.get(url, {'format': 'json'}, follow=True)
+        data = json.loads(response.content)
+        return data['rows']
 
     def test_show_builds_for_project(self):
         """ Builds for a project should be displayed """
@@ -692,10 +1035,14 @@ class ProjectBuildsPageTests(TestCase):
         """ Task should be shown as suffix on build name """
         build = Build.objects.create(**self.project1_build_success)
         Target.objects.create(build=build, target='bash', task='clean')
-        url = reverse("projectbuilds", args=(self.project1.id,))
-        response = self.client.get(url, follow=True)
-        result = re.findall('^ +bash:clean$', response.content, re.MULTILINE)
-        self.assertEqual(len(result), 2)
+
+        url = reverse('projectbuilds', args=(self.project1.id,))
+        response = self.client.get(url, {'format': 'json'}, follow=True)
+        data = json.loads(response.content)
+        cell = data['rows'][0]['static:target']
+
+        result = re.findall('^ +bash:clean', cell, re.MULTILINE)
+        self.assertEqual(len(result), 1)
 
     def test_cli_builds_hides_tabs(self):
         """
@@ -755,32 +1102,46 @@ class AllBuildsPageTests(TestCase):
             "outcome": Build.SUCCEEDED
         }
 
+    def _get_row_for_build(self, data, build_id):
+        """ Get the object representing the table data for a project """
+        return [row for row in data['rows']
+                    if row['id'] == build_id][0]
+
     def test_show_tasks_in_allbuilds(self):
         """ Task should be shown as suffix on build name """
         build = Build.objects.create(**self.project1_build_success)
         Target.objects.create(build=build, target='bash', task='clean')
-        url = reverse('all-builds')
-        response = self.client.get(url, follow=True)
-        result = re.findall('bash:clean', response.content, re.MULTILINE)
-        self.assertEqual(len(result), 3)
 
-    def test_no_run_again_for_cli_build(self):
-        """ "Run again" button should not be shown for command-line builds """
-        build = Build.objects.create(**self.default_project_build_success)
+        url = reverse('all-builds')
+        response = self.client.get(url, {'format': 'json'}, follow=True)
+        data = json.loads(response.content)
+        cell = data['rows'][0]['static:target']
+
+        result = re.findall('bash:clean', cell, re.MULTILINE)
+        self.assertEqual(len(result), 1)
+
+    def test_run_again(self):
+        """
+        "Run again" button should not be shown for command-line builds,
+        but should be shown for other builds
+        """
+        build1 = Build.objects.create(**self.project1_build_success)
+        default_build = Build.objects.create(**self.default_project_build_success)
         url = reverse('all-builds')
         response = self.client.get(url, follow=True)
         soup = BeautifulSoup(response.content)
 
-        attrs = {'data-latest-build-result': build.id}
-        result = soup.find('div', attrs=attrs)
-
         # shouldn't see a run again button for command-line builds
+        attrs = {'data-latest-build-result': default_build.id}
+        result = soup.find('div', attrs=attrs)
         run_again_button = result.select('button')
         self.assertEqual(len(run_again_button), 0)
 
-        # should see a help icon for command-line builds
-        help_icon = result.select('i.get-help-green')
-        self.assertEqual(len(help_icon), 1)
+        # should see a run again button for non-command-line builds
+        attrs = {'data-latest-build-result': build1.id}
+        result = soup.find('div', attrs=attrs)
+        run_again_button = result.select('button')
+        self.assertEqual(len(run_again_button), 1)
 
     def test_tooltips_on_project_name(self):
         """
@@ -792,20 +1153,28 @@ class AllBuildsPageTests(TestCase):
         default_build = Build.objects.create(**self.default_project_build_success)
 
         url = reverse('all-builds')
-        response = self.client.get(url, follow=True)
-        soup = BeautifulSoup(response.content)
+        response = self.client.get(url, {'format': 'json'}, follow=True)
+        data = json.loads(response.content)
+
+        # get the data row for the non-command-line builds project
+        other_project_row = self._get_row_for_build(data, build1.id)
+
+        # make sure there is some HTML
+        soup = BeautifulSoup(other_project_row['static:project'])
+        self.assertEqual(len(soup.select('a')), 1,
+                         'should be a project name link')
 
         # no help icon on non-default project name
-        result = soup.find('tr', attrs={'data-table-build-result': build1.id})
-        name = result.select('td.project-name')[0]
-        icons = name.select('i.get-help')
+        icons = soup.select('i.get-help')
         self.assertEqual(len(icons), 0,
                          'should not be a help icon for non-cli builds name')
 
+        # get the data row for the command-line builds project
+        default_project_row = self._get_row_for_build(data, default_build.id)
+
         # help icon on default project name
-        result = soup.find('tr', attrs={'data-table-build-result': default_build.id})
-        name = result.select('td.project-name')[0]
-        icons = name.select('i.get-help')
+        soup = BeautifulSoup(default_project_row['static:project'])
+        icons = soup.select('i.get-help')
         self.assertEqual(len(icons), 1,
                          'should be a help icon for cli builds name')
 

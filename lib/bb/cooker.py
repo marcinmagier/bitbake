@@ -67,6 +67,14 @@ class CollectionError(bb.BBHandledException):
 class state:
     initial, parsing, running, shutdown, forceshutdown, stopped, error = range(7)
 
+    @classmethod
+    def get_name(cls, code):
+        for name in dir(cls):
+            value = getattr(cls, name)
+            if type(value) == type(cls.initial) and value == code:
+                return name
+        raise ValueError("Invalid status code: %s" % code)
+
 
 class SkippedPackage:
     def __init__(self, info = None, reason = None):
@@ -234,9 +242,9 @@ class BBCooker:
 
     def sigterm_exception(self, signum, stackframe):
         if signum == signal.SIGTERM:
-            bb.warn("Cooker recieved SIGTERM, shutting down...")
+            bb.warn("Cooker received SIGTERM, shutting down...")
         elif signum == signal.SIGHUP:
-            bb.warn("Cooker recieved SIGHUP, shutting down...")
+            bb.warn("Cooker received SIGHUP, shutting down...")
         self.state = state.forceshutdown
 
     def setFeatures(self, features):
@@ -645,7 +653,7 @@ class BBCooker:
         data.expandKeys(envdata)
         for e in envdata.keys():
             if data.getVarFlag( e, 'python', envdata ):
-                logger.plain("\npython %s () {\n%s}\n", e, envdata.getVar(e, True))
+                logger.plain("\npython %s () {\n%s}\n", e, envdata.getVar(e, False))
 
 
     def buildTaskData(self, pkgs_to_build, task, abort, allowincomplete=False):
@@ -717,7 +725,14 @@ class BBCooker:
         depend_tree["packages"] = {}
         depend_tree["rdepends-pkg"] = {}
         depend_tree["rrecs-pkg"] = {}
+        depend_tree['providermap'] = {}
         depend_tree["layer-priorities"] = self.recipecache.bbfile_config_priorities
+
+        for name, fn in taskdata.get_providermap().iteritems():
+            pn = self.recipecache.pkg_fn[fn]
+            if name != pn:
+                version = "%s:%s-%s" % self.recipecache.pkg_pepvpr[fn]
+                depend_tree['providermap'][name] = (pn, version)
 
         for task in xrange(len(rq.rqdata.runq_fnid)):
             taskname = rq.rqdata.runq_task[task]
@@ -893,7 +908,7 @@ class BBCooker:
         logger.info("PN build list saved to 'pn-buildlist'")
         for pn in depgraph["depends"]:
             for depend in depgraph["depends"][pn]:
-                print('"%s" -> "%s"' % (pn, depend), file=depends_file)
+                print('"%s" -> "%s" [style=solid]' % (pn, depend), file=depends_file)
         for pn in depgraph["rdepends-pn"]:
             for rdepend in depgraph["rdepends-pn"][pn]:
                 print('"%s" -> "%s" [style=dashed]' % (pn, rdepend), file=depends_file)
@@ -911,13 +926,13 @@ class BBCooker:
             else:
                 print('"%s" [label="%s(%s) %s\\n%s"]' % (package, package, pn, version, fn), file=depends_file)
             for depend in depgraph["depends"][pn]:
-                print('"%s" -> "%s"' % (package, depend), file=depends_file)
+                print('"%s" -> "%s" [style=solid]' % (package, depend), file=depends_file)
         for package in depgraph["rdepends-pkg"]:
             for rdepend in depgraph["rdepends-pkg"][package]:
                 print('"%s" -> "%s" [style=dashed]' % (package, rdepend), file=depends_file)
         for package in depgraph["rrecs-pkg"]:
             for rdepend in depgraph["rrecs-pkg"][package]:
-                print('"%s" -> "%s" [style=dashed]' % (package, rdepend), file=depends_file)
+                print('"%s" -> "%s" [style=dotted]' % (package, rdepend), file=depends_file)
         print("}", file=depends_file)
         logger.info("Package dependencies saved to 'package-depends.dot'")
 
@@ -1019,22 +1034,21 @@ class BBCooker:
 
     def findFilesMatchingInDir(self, filepattern, directory):
         """
-        Searches for files matching the regex 'pattern' which are children of
+        Searches for files containing the substring 'filepattern' which are children of
         'directory' in each BBPATH. i.e. to find all rootfs package classes available
         to BitBake one could call findFilesMatchingInDir(self, 'rootfs_', 'classes')
         or to find all machine configuration files one could call:
-        findFilesMatchingInDir(self, 'conf/machines', 'conf')
+        findFilesMatchingInDir(self, '.conf', 'conf/machine')
         """
 
         matches = []
-        p = re.compile(re.escape(filepattern))
         bbpaths = self.data.getVar('BBPATH', True).split(':')
         for path in bbpaths:
             dirpath = os.path.join(path, directory)
             if os.path.exists(dirpath):
                 for root, dirs, files in os.walk(dirpath):
                     for f in files:
-                        if p.search(f):
+                        if filepattern in f:
                             matches.append(f)
 
         if matches:
@@ -1072,7 +1086,7 @@ class BBCooker:
 
         for pfn in self.recipecache.pkg_fn:
             inherits = self.recipecache.inherits.get(pfn, None)
-            if inherits and inherits.count(klass) > 0:
+            if inherits and klass in inherits:
                 pkg_list.append(self.recipecache.pkg_fn[pfn])
 
         return pkg_list
@@ -1094,28 +1108,6 @@ class BBCooker:
         # generate a dependency tree for all our packages
         tree = self.generatePkgDepTreeData(pkgs, 'build')
         bb.event.fire(bb.event.TargetsTreeGenerated(tree), self.data)
-
-    def buildWorldTargetList(self):
-        """
-         Build package list for "bitbake world"
-        """
-        parselog.debug(1, "collating packages for \"world\"")
-        for f in self.recipecache.possible_world:
-            terminal = True
-            pn = self.recipecache.pkg_fn[f]
-
-            for p in self.recipecache.pn_provides[pn]:
-                if p.startswith('virtual/'):
-                    parselog.debug(2, "World build skipping %s due to %s provider starting with virtual/", f, p)
-                    terminal = False
-                    break
-                for pf in self.recipecache.providers[p]:
-                    if self.recipecache.pkg_fn[pf] != pn:
-                        parselog.debug(2, "World build skipping %s due to both us and %s providing %s", f, pf, p)
-                        terminal = False
-                        break
-            if terminal:
-                self.recipecache.world_target.add(pn)
 
     def interactiveMode( self ):
         """Drop off into a shell"""
@@ -1437,14 +1429,21 @@ class BBCooker:
         dump = {}
         for k in self.data.keys():
             try:
-                v = self.data.getVar(k, True)
+                expand = True
+                flags = self.data.getVarFlags(k)
+                if flags and "func" in flags and "python" in flags:
+                    expand = False
+                v = self.data.getVar(k, expand)
                 if not k.startswith("__") and not isinstance(v, bb.data_smart.DataSmart):
                     dump[k] = {
     'v' : v ,
     'history' : self.data.varhistory.variable(k),
                     }
                     for d in flaglist:
-                        dump[k][d] = self.data.getVarFlag(k, d)
+                        if flags and d in flags:
+                            dump[k][d] = flags[d]
+                        else:
+                            dump[k][d] = None
             except Exception as e:
                 print(e)
         return dump
@@ -1577,7 +1576,7 @@ class BBCooker:
                 parselog.warn("Explicit target \"%s\" is in ASSUME_PROVIDED, ignoring" % pkg)
 
         if 'world' in pkgs_to_build:
-            self.buildWorldTargetList()
+            bb.providers.buildWorldTargetList(self.recipecache)
             pkgs_to_build.remove('world')
             for t in self.recipecache.world_target:
                 pkgs_to_build.append(t)
@@ -1642,6 +1641,9 @@ class BBCooker:
             self.state = state.forceshutdown
         else:
             self.state = state.shutdown
+
+        if self.parser:
+            self.parser.shutdown(clean=not force, force=force)
 
     def finishcommand(self):
         self.state = state.initial
@@ -1767,11 +1769,24 @@ class CookerCollectFiles(object):
         bbmask = config.getVar('BBMASK', True)
 
         if bbmask:
+            # First validate the individual regular expressions and ignore any
+            # that do not compile
+            bbmasks = []
+            for mask in bbmask.split():
+                try:
+                    re.compile(mask)
+                    bbmasks.append(mask)
+                except sre_constants.error:
+                    collectlog.critical("BBMASK contains an invalid regular expression, ignoring: %s" % mask)
+
+            # Then validate the combined regular expressions. This should never
+            # fail, but better safe than sorry...
+            bbmask = "|".join(bbmasks)
             try:
                 bbmask_compiled = re.compile(bbmask)
             except sre_constants.error:
-                collectlog.critical("BBMASK is not a valid regular expression, ignoring.")
-                return list(newfiles), 0
+                collectlog.critical("BBMASK is not a valid regular expression, ignoring: %s" % bbmask)
+                bbmask = None
 
         bbfiles = []
         bbappend = []
@@ -1981,8 +1996,6 @@ class CookerParser(object):
         self.total = len(filelist)
 
         self.current = 0
-        self.num_processes = int(self.cfgdata.getVar("BB_NUMBER_PARSE_THREADS", True) or
-                                 multiprocessing.cpu_count())
         self.process_names = []
 
         self.bb_cache = bb.cache.Cache(self.cfgdata, self.cfghash, cooker.caches_array)
@@ -1997,6 +2010,9 @@ class CookerParser(object):
         self.toparse = self.total - len(self.fromcache)
         self.progress_chunk = max(self.toparse / 100, 1)
 
+        self.num_processes = min(int(self.cfgdata.getVar("BB_NUMBER_PARSE_THREADS", True) or
+                                 multiprocessing.cpu_count()), len(self.willparse))
+
         self.start()
         self.haveshutdown = False
 
@@ -2007,6 +2023,7 @@ class CookerParser(object):
             bb.event.fire(bb.event.ParseStarted(self.toparse), self.cfgdata)
             def init():
                 Parser.cfg = self.cfgdata
+                bb.utils.set_process_name(multiprocessing.current_process().name)
                 multiprocessing.util.Finalize(None, bb.codeparser.parser_cache_save, args=(self.cfgdata,), exitpriority=1)
                 multiprocessing.util.Finalize(None, bb.fetch.fetcher_parse_save, args=(self.cfgdata,), exitpriority=1)
 
@@ -2041,6 +2058,7 @@ class CookerParser(object):
             self.feeder_quit.put(None)
             for process in self.processes:
                 self.jobs.put(None)
+                self.parser_quit.put(None)
         else:
             self.feeder_quit.put('cancel')
 
@@ -2123,11 +2141,6 @@ class CookerParser(object):
             self.error += 1
             _, value, _ = sys.exc_info()
             logger.error('ExpansionError during parsing %s: %s', value.recipe, str(exc))
-            self.shutdown(clean=False)
-            return False
-        except SyntaxError as exc:
-            self.error += 1
-            logger.error('Unable to parse %s', exc.recipe)
             self.shutdown(clean=False)
             return False
         except Exception as exc:
